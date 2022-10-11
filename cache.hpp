@@ -17,6 +17,12 @@
 
 namespace Caching {
 
+/**
+ * Dependancy class
+ *
+ * Implements convenient way to create key for Cache and ConcurrentCache classes
+ * Internally uses std::tuple adding serialization capability
+ */
 template <typename... T>
 class Dependances
 {
@@ -44,6 +50,9 @@ private:
     const std::tuple<T...> vals;
 };
 
+/// @brief  Serializer
+/// @param val object supporting serialize method or trivial value to serialize
+/// @return byte array representing passed value
 constexpr auto serialize(auto val) -> std::array<std::byte, sizeof(val)>
 {
     if constexpr (requires { val.serialize(); })
@@ -56,38 +65,54 @@ constexpr auto serialize(auto val) -> std::array<std::byte, sizeof(val)>
     }
 }
 
+/**
+ * Cache class
+ *
+ * Implements caching for values using std::unordered_map
+ * Provides serialization and file dump capabilities
+ *
+ * @tparam Key type of a key for internal std::unordered_map
+ * @tparam Value type of cached values
+ */
 template <typename Key, typename Value>
 class Cache
 {
 public:
     Cache()
-        : cache_file_name{[] {
-              using namespace std::string_literals;
-              std::string res = "_cache";
-              std::apply(
-                  [&](auto&&... args) {
-                      ((res += ("_"s + typeid(decltype(args)).name())), ...);
-                  },
-                  Key{}.get_vals());
-              res += "__";
-              res += typeid(Value).name();
-              res += ".bin";
-              return res;
-          }()}
     {
-        // load from file
+        load_from_file();
     }
 
     ~Cache()
     {
-        std::ofstream ofp(cache_file_name, std::ios::out | std::ios::binary);
-        const auto data = this->serialize();
-        ofp.write(reinterpret_cast<const char*>(data.data()), data.size());
+        dump_to_file();
     }
 
-    const std::string& get_cache_file_name() const { return cache_file_name; }
+    /// @brief Getter for file name for cache dump
+    /// @return name of an associated file
+    static const std::string& get_cache_file_name()
+    {
+        static std::string cache_file_name = []{
+            using namespace std::string_literals;
+            // Calculating of an associated file name based on types of key and value
+            std::string res = "_cache";
+            std::apply(
+                [&](auto&&... args) {
+                    ((res += ("_"s + typeid(decltype(args)).name())), ...);
+                },
+                Key{}.get_vals());
+            res += "__";
+            res += typeid(Value).name();
+            res += ".bin";
+            return res;
+        }();
+        return cache_file_name;
+    }
 
-    std::optional<Value> load(const Key& key) const
+    /// @brief Obtaines value by provided key if present
+    /// @param key key for value
+    /// @return std::optional for value
+    [[nodiscard]] std::optional<Value> load(const Key& key) const
     {
         if (storage.find(key) != storage.end()) {
             return storage.at(key);
@@ -95,12 +120,17 @@ public:
         return std::nullopt;
     }
 
-    template <typename V>  // Forwarding reference for value
+    /// @brief Saves value to the cache
+    /// @tparam V type for value. Required for perfect forwarding
+    /// @param deps key for storing value
+    /// @param value value to store at key
+    template <typename V>
     void store(const Key& deps, V&& value)
     {
         storage[deps] = std::forward<V>(value);
     }
 
+protected:
     std::vector<std::byte> serialize() const
     {
         std::vector<std::byte> binary_data{storage.size() *
@@ -117,21 +147,49 @@ public:
         return binary_data;
     }
 
-private:
-    const std::string cache_file_name;
+    /// @brief Restores data from an associated file
+    void load_from_file()
+    {
+        // Unimplemented
+    }
+
+    /// @brief Dumps cache content to an associated file
+    void dump_to_file()
+    {
+        std::ofstream ofp(get_cache_file_name(), std::ios::out | std::ios::binary);
+        const auto data = this->serialize();
+        ofp.write(reinterpret_cast<const char*>(data.data()), data.size());
+    }
+
     std::unordered_map<Key, Value> storage;
 };
 
+/**
+ * ConcurrentCache class
+ *
+ * Child for Cache decorating methods enabling concurrent usage
+ * Implements same methods as Cache class
+ *
+ * @tparam Key type of a key for internal std::unordered_map
+ * @tparam Value type of cached values
+ */
 template <typename Key, typename Value>
 class ConcurrentCache : public Cache<Key, Value>
 {
 public:
-    std::optional<Value> load(const Key& key) const
+    /// @brief Obtaines value by provided key if present concurrently
+    /// @param key key for value
+    /// @return std::optional for value
+    [[nodiscard]] std::optional<Value> load(const Key& key) const
     {
         std::shared_lock lk{mtx};
         return Cache<Key, Value>::load(key);
     }
 
+    /// @brief Saves value to the cache cuncurrently
+    /// @tparam V type for value. Required for perfect forwarding
+    /// @param deps key for storing value
+    /// @param value value to store at key
     template <typename V>
     void store(const Key& deps, V&& value)
     {
@@ -139,19 +197,19 @@ public:
         Cache<Key, Value>::store(deps, std::forward<V>(value));
     }
 
+private:
     std::vector<std::byte> serialize() const
     {
         std::shared_lock lk{mtx};
         return Cache<Key, Value>::serialize();
     }
 
-private:
     mutable std::shared_mutex mtx;
 };
 
 }  // namespace Caching
 
-// Hash struct overload for Dependancies
+/// @brief Hash struct overload for Dependancies
 template <typename... T>
 struct std::hash<Caching::Dependances<T...>>
 {
