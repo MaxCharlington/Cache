@@ -15,17 +15,22 @@
 #include <mutex>
 #include <shared_mutex>
 
+namespace Caching {
+
 template <typename... T>
-class Dependances {
+class Dependances
+{
 public:
     constexpr Dependances(T... args) : vals{std::make_tuple(args...)} {}
     constexpr Dependances() = default;
 
-    constexpr bool operator==(const Dependances& deps) const {
+    constexpr bool operator==(const Dependances& deps) const
+    {
         return this->vals == deps.vals;
     }
 
-    std::array<std::byte, sizeof(std::tuple<T...>)> serialize() const {
+    std::array<std::byte, sizeof(std::tuple<T...>)> serialize() const
+    {
         std::array<std::byte, sizeof(std::tuple<T...>)> result;
         for (size_t i = 0; i < sizeof(std::tuple<T...>); i++) {
             result[i] = *(reinterpret_cast<const std::byte*>(&vals) + i);
@@ -39,31 +44,21 @@ private:
     const std::tuple<T...> vals;
 };
 
-template <typename... T>
-struct std::hash<Dependances<T...>> {
-    constexpr std::size_t operator()(
-        const Dependances<T...>& deps) const noexcept {
-        size_t result = std::numeric_limits<size_t>::max();
-        std::apply(
-            [&result](auto&&... args) {
-                ((result ^= std::hash<std::string>{}(std::to_string(args))),
-                 ...);
-            },
-            deps.get_vals());
-        return result;
-    }
-};
-
-constexpr auto serialize(auto val) -> std::array<std::byte, sizeof(val)> {
-    if constexpr (requires { val.serialize(); }) {
+constexpr auto serialize(auto val) -> std::array<std::byte, sizeof(val)>
+{
+    if constexpr (requires { val.serialize(); })
+    {
         return val.serialize();
-    } else {
+    }
+    else
+    {
         return std::bit_cast<std::array<std::byte, sizeof(val)>>(val);
     }
 }
 
 template <typename Key, typename Value>
-class Cache {
+class Cache
+{
 public:
     Cache()
         : cache_file_name{[] {
@@ -78,11 +73,13 @@ public:
               res += typeid(Value).name();
               res += ".bin";
               return res;
-          }()} {
+          }()}
+    {
         // load from file
     }
 
-    ~Cache() {
+    ~Cache()
+    {
         std::ofstream ofp(cache_file_name, std::ios::out | std::ios::binary);
         const auto data = this->serialize();
         ofp.write(reinterpret_cast<const char*>(data.data()), data.size());
@@ -90,8 +87,8 @@ public:
 
     const std::string& get_cache_file_name() const { return cache_file_name; }
 
-    std::optional<Value> load(const Key& key) const {
-        std::shared_lock lk{mtx};
+    std::optional<Value> load(const Key& key) const
+    {
         if (storage.find(key) != storage.end()) {
             return storage.at(key);
         }
@@ -99,20 +96,21 @@ public:
     }
 
     template <typename V>  // Forwarding reference for value
-    void store(const Key& deps, V&& value) {
-        std::unique_lock lk{mtx};
+    void store(const Key& deps, V&& value)
+    {
         storage[deps] = std::forward<V>(value);
     }
 
-    std::vector<std::byte> serialize() const {
-        std::shared_lock lk{mtx};
+    std::vector<std::byte> serialize() const
+    {
         std::vector<std::byte> binary_data{storage.size() *
                                            (sizeof(Key) + sizeof(Value))};
-        for (const auto& [key, value] : storage) {
-            auto bin_key = ::serialize(key);
+        for (const auto& [key, value] : storage)
+        {
+            auto bin_key = Caching::serialize(key);
             std::ranges::for_each(
                 bin_key, [&](auto byte) { binary_data.push_back(byte); });
-            auto bin_value = ::serialize(value);
+            auto bin_value = Caching::serialize(value);
             std::ranges::for_each(
                 bin_value, [&](auto byte) { binary_data.push_back(byte); });
         }
@@ -120,7 +118,52 @@ public:
     }
 
 private:
-    mutable std::shared_mutex mtx;
     const std::string cache_file_name;
     std::unordered_map<Key, Value> storage;
+};
+
+template <typename Key, typename Value>
+class ConcurrentCache : public Cache<Key, Value>
+{
+public:
+    std::optional<Value> load(const Key& key) const
+    {
+        std::shared_lock lk{mtx};
+        return Cache<Key, Value>::load(key);
+    }
+
+    template <typename V>
+    void store(const Key& deps, V&& value)
+    {
+        std::unique_lock lk{mtx};
+        Cache<Key, Value>::store(deps, std::forward<V>(value));
+    }
+
+    std::vector<std::byte> serialize() const
+    {
+        std::shared_lock lk{mtx};
+        return Cache<Key, Value>::serialize();
+    }
+
+private:
+    mutable std::shared_mutex mtx;
+};
+
+}  // namespace Caching
+
+// Hash struct overload for Dependancies
+template <typename... T>
+struct std::hash<Caching::Dependances<T...>>
+{
+    constexpr std::size_t operator()(
+        const Caching::Dependances<T...>& deps) const noexcept {
+        size_t result = std::numeric_limits<size_t>::max();
+        std::apply(
+            [&result](auto&&... args) {
+                ((result ^= std::hash<std::string>{}(std::to_string(args))),
+                 ...);
+            },
+            deps.get_vals());
+        return result;
+    }
 };
