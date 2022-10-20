@@ -1,3 +1,5 @@
+#pragma once
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -15,6 +17,9 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "serialization.hpp"
+#include "helpers.hpp"
 
 namespace Caching {
 
@@ -49,11 +54,11 @@ public:
     std::array<std::byte, BinSize> serialize() const
     {
         std::array<std::byte, BinSize> bytes;
-        auto to_byte_arr = [&, offset = 0](auto& val) mutable {
-            std::memcpy(bytes.data() + offset, &val, sizeof(val));
-            offset += sizeof(val);
+        auto to_byte_arr = [&, offset = 0]<typename Type>(Type&& val) mutable {
+            new (bytes.data() + offset) std::remove_cvref_t<Type>(std::forward<Type>(val));
+            offset += sizeof(Type);
         };
-        std::apply([&](auto&&... args) {((to_byte_arr(args)), ...);}, vals);
+        std::apply([&](auto&&... args) {((to_byte_arr(std::forward<decltype(args)>(args))), ...);}, vals);
         return bytes;
     }
 
@@ -71,43 +76,6 @@ private:
     Values vals;
 };
 
-
-/// @brief  Serializer
-/// @param val object supporting serialize method or trivial value to serialize
-/// @return byte array representing passed value
-constexpr auto serialize(auto val) // -> std::array<std::byte, SomeSize>
-{
-    if constexpr (requires { val.serialize(); })
-    {
-        return val.serialize();
-    }
-    else if constexpr (std::is_trivial_v<decltype(val)>)
-    {
-        return std::bit_cast<std::array<std::byte, sizeof(val)>>(val);
-    }
-    throw std::invalid_argument{"val is neither object of a class with method serealize nor of a trivial type"};
-}
-
-/// @brief  Deserealizer
-/// @param bytes byte span of a size of S
-/// @tparam T is type of obtained object
-/// @tparam S size of provided span
-/// @return object of type T
-template<typename T, size_t S>
-constexpr auto deserialize(std::span<std::byte, S> bytes) -> T
-{
-    if constexpr (requires { T::deserialize(bytes); })
-    {
-        return T::deserialize(bytes);
-    }
-    else if constexpr (std::is_trivial_v<T>)
-    {
-        T obj;
-        std::memcpy(&obj, bytes.data(), bytes.size());
-        return obj;
-    }
-    throw std::invalid_argument{"T is neither object of a class with method deserealize nor of a trivial type"};
-}
 /**
  * Cache class
  *
@@ -116,8 +84,9 @@ constexpr auto deserialize(std::span<std::byte, S> bytes) -> T
  *
  * @tparam Key type of a key for internal std::unordered_map
  * @tparam Value type of cached values
+ * @tparam Tag file tag string for identificaion
  */
-template <typename Key, typename Value>
+template <typename Key, typename Value, StringLiteral Tag = "">
 class Cache
 {
 public:
@@ -146,6 +115,10 @@ public:
                 Key{}.get_vals());
             res += "__";
             res += typeid(Value).name();
+            if constexpr (std::string_view{Tag.value} != "")
+            {
+                res += "_" + std::string{Tag.value};
+            }
             res += ".bin";
             return res;
         }();
@@ -257,18 +230,23 @@ protected:
  *
  * @tparam Key type of a key for internal std::unordered_map
  * @tparam Value type of cached values
+ * @tparam Tag file tag string for identificaion
  */
-template <typename Key, typename Value>
-class ConcurrentCache : public Cache<Key, Value>
+template <typename Key, typename Value, StringLiteral Tag = "">
+class ConcurrentCache : public Cache<Key, Value, Tag>
 {
 public:
+    ConcurrentCache()
+    {
+        load_impl_ptr = &load_protected_impl;
+    }
+
     /// @brief Obtaines value by provided key if present concurrently
     /// @param key key for value
     /// @return std::optional for value
     [[nodiscard]] std::optional<Value> load(const Key& key) const
     {
-        std::shared_lock lk{mtx};
-        return Cache<Key, Value>::load(key);
+        return load_impl_ptr(*this, key);
     }
 
     /// @brief Obtaines value by provided key if present concurrently without lock
@@ -276,7 +254,22 @@ public:
     /// @return std::optional for value
     [[nodiscard]] std::optional<Value> load_unprotected(const Key& key) const
     {
-        return Cache<Key, Value>::load(key);
+        return load_unprotected_impl(*this, key);
+    }
+
+    /// @brief Sets load implementation to optimize for stores awailability
+    /// @param can_store flag whether stores can occure
+    void set_stores_awailability(bool can_store) const
+    {
+        std::unique_lock lk{mtx};
+        if (can_store)
+        {
+            load_impl_ptr = &load_protected_impl;
+        }
+        else
+        {
+            load_impl_ptr = &load_unprotected_impl;
+        }
     }
 
     /// @brief Saves value to the cache cuncurrently
@@ -301,24 +294,21 @@ public:
     }
 
 private:
+    [[nodiscard]] static std::optional<Value> load_protected_impl(const ConcurrentCache& self, const Key& key)
+    {
+        std::shared_lock lk{self.mtx};
+        return static_cast<const Cache<Key, Value>&>(self).load(key);
+    }
+
+    [[nodiscard]] static std::optional<Value> load_unprotected_impl(const ConcurrentCache& self, const Key& key)
+    {
+        return static_cast<const Cache<Key, Value>&>(self).load(key);
+    }
+
+    using load_impl_ptr_t = std::optional<Value>(*)(const ConcurrentCache& self, const Key&);
+
+    mutable load_impl_ptr_t load_impl_ptr;
     mutable std::shared_mutex mtx;
 };
 
 }  // namespace Caching
-
-/// @brief Hash struct overload for Dependancies
-template <typename... T>
-struct std::hash<Caching::Dependances<T...>>
-{
-    constexpr std::size_t operator()(
-        const Caching::Dependances<T...>& deps) const noexcept {
-        size_t result = std::numeric_limits<size_t>::max();
-        std::apply(
-            [&result](auto&&... args) {
-                ((result ^= std::hash<std::string>{}(std::to_string(args))),
-                 ...);
-            },
-            deps.get_vals());
-        return result;
-    }
-};
