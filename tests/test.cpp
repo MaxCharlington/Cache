@@ -20,7 +20,7 @@ int main() {
     }
 
     { // Non trivial type
-        // static_assert(!std::is_trivially_copyable_v<std::complex<double>>);
+        // static_assert(not std::is_trivially_copyable_v<std::complex<double>>);
         // Cache<Dependances<double>, std::complex<double>> cache;
     }
 
@@ -34,7 +34,7 @@ int main() {
         cache.store({1}, 4.5);
         auto stored = cache.load({1});
 
-        cache.set_stores_awailability(false);
+        cache.set_stores_availability(false);
 
         stored = cache.load({1});
     }

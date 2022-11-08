@@ -257,9 +257,9 @@ public:
         return load_unprotected_impl(*this, key);
     }
 
-    /// @brief Sets load implementation to optimize for stores awailability
+    /// @brief Sets load implementation to optimize for stores availability
     /// @param can_store flag whether stores can occure
-    void set_stores_awailability(bool can_store) const
+    void set_stores_availability(bool can_store) const
     {
         std::unique_lock lk{mtx};
         if (can_store)
